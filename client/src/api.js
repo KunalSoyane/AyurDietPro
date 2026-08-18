@@ -1,6 +1,6 @@
 const rawBaseUrl = (import.meta.env.VITE_API_URL || "").trim();
 
-const PROD_FALLBACK_BASE = "https://ayurdiet-backend-cah4.onrender.com";
+const PROD_FALLBACK_BASE = "https://ayur-diet-andhig07h-kunal-soyanes-projects.vercel.app";
 
 function toApiBase(raw) {
   try {

@@ -1,21 +1,41 @@
+import asyncio
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import os
 
 from database import close_db, init_db
 from routes import auth_routes, diet_routes, food_routes, patient_routes, report_routes
 from routes import admin_routes
 from seed_data import seed_defaults
 
+_initialized = False
+_init_lock = asyncio.Lock()
+
+
+async def ensure_initialized() -> None:
+    """Idempotent DB bootstrap.
+
+    Runs via lifespan on uvicorn/docker, and lazily via middleware on
+    serverless platforms (e.g. Vercel) that never emit lifespan events.
+    """
+    global _initialized
+    if _initialized:
+        return
+    async with _init_lock:
+        if _initialized:
+            return
+        await init_db()
+        await seed_defaults()
+        _initialized = True
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
-    await seed_defaults()
+    await ensure_initialized()
     yield
     await close_db()
 
@@ -24,11 +44,21 @@ app = FastAPI(title="AyurDiet Pro API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://([a-z0-9-]+\.)*onrender\.com|http://(localhost|127\.0\.0\.1):\d+",
+    allow_origin_regex=(
+        r"https://([a-z0-9-]+\.)*onrender\.com"
+        r"|https://([a-z0-9-]+\.)*vercel\.app"
+        r"|http://(localhost|127\.0\.0\.1):\d+"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def ensure_db_ready(request: Request, call_next):
+    await ensure_initialized()
+    return await call_next(request)
 
 
 @app.get("/health")
