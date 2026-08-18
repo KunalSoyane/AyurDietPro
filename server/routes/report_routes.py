@@ -1,45 +1,59 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 
 from auth import get_current_user
-from database import get_db, SQLiteDB
+from models import DietPlan, Patient, User
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
+def _iso(value):
+    """Normalise stored datetimes (including legacy strings) to ISO-8601."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).isoformat()
+        except ValueError:
+            return value
+    return value
+
+
 @router.get("/weekly")
-def get_weekly_report(
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+async def get_weekly_report(
+    current_user: User = Depends(get_current_user),
 ):
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    user_id_str = str(current_user["_id"])
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    user_id_str = str(current_user.id)
 
     # New patients in last 7 days
-    new_patients_count = db.patients.count_documents({
-        "user_id": user_id_str,
-        "created_at": {"$gte": seven_days_ago}
-    })
+    new_patients_count = await Patient.find(
+        Patient.user_id == user_id_str,
+        Patient.created_at >= seven_days_ago,
+    ).count()
 
     # Diet plans in last 7 days
-    new_plans_count = db.diet_plans.count_documents({
-        "user_id": user_id_str,
-        "created_at": {"$gte": seven_days_ago}
-    })
+    new_plans_count = await DietPlan.find(
+        DietPlan.user_id == user_id_str,
+        DietPlan.created_at >= seven_days_ago,
+    ).count()
 
     # Patient distribution by Vikriti
     pipeline = [
         {"$match": {"user_id": user_id_str}},
         {"$group": {"_id": "$vikriti", "count": {"$sum": 1}}}
     ]
-    vikriti_dist = list(db.patients.aggregate(pipeline))
+    vikriti_dist = await Patient.aggregate(pipeline).to_list()
     vikriti_stats = {item["_id"]: item["count"] for item in vikriti_dist if item["_id"]}
 
     # Recent patients
-    recent_patients = list(db.patients.find(
-        {"user_id": user_id_str}
-    ).sort("created_at", -1).limit(5))
+    recent_patients = (
+        await Patient.find(Patient.user_id == user_id_str)
+        .sort([("created_at", -1)])
+        .limit(5)
+        .to_list()
+    )
 
     return {
         "stats": {
@@ -49,10 +63,10 @@ def get_weekly_report(
         },
         "recent_patients": [
             {
-                "id": str(p["_id"]),
-                "name": p.get("name"),
-                "vikriti": p.get("vikriti"),
-                "created_at": p.get("created_at")
+                "id": str(p.id),
+                "name": p.name,
+                "vikriti": p.vikriti,
+                "created_at": _iso(p.created_at)
             }
             for p in recent_patients
         ],

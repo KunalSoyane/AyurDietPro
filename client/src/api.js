@@ -169,7 +169,10 @@ export const api = {
 
   // Foods & Templates
   foods: (params = {}) => {
-    const q = new URLSearchParams(params).toString();
+    const cleanParams = Object.fromEntries(
+      Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "")
+    );
+    const q = new URLSearchParams(cleanParams).toString();
     return request(`/foods${q ? `?${q}` : ""}`);
   },
   foodCategories: () => request("/foods/categories"),

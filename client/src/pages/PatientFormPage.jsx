@@ -30,11 +30,16 @@ export default function PatientFormPage() {
   useEffect(() => {
     if (isEdit) {
       setLoading(true);
-      api.patient(id).then((p) => {
-        setForm(p);
-        setConditionsText((p.conditions || []).join(", "));
-        setLoading(false);
-      });
+      api
+        .patient(id)
+        .then((p) => {
+          setForm(p);
+          setConditionsText((p.conditions || []).join(", "));
+        })
+        .catch(() => {
+          navigate("/patients");
+        })
+        .finally(() => setLoading(false));
     }
   }, [id, isEdit]);
 
@@ -50,20 +55,23 @@ export default function PatientFormPage() {
         .filter(Boolean),
     };
 
-    if (isEdit) {
-      await api.updatePatient(id, payload);
-      navigate(`/patients/${id}`);
-    } else {
-      const created = await api.createPatient(payload);
-      // Fallback check for MongoDB _id vs id
-      const createdId = created._id || created.id;
-      
-      if (createdId) {
-        navigate(`/patients/${createdId}/diet`);
+    try {
+      if (isEdit) {
+        await api.updatePatient(id, payload);
+        navigate(`/patients/${id}`);
       } else {
-        console.error("Created patient missing ID:", created);
-        navigate("/patients");
+        const created = await api.createPatient(payload);
+        const createdId = created?._id || created?.id;
+
+        if (createdId) {
+          navigate(`/patients/${createdId}/diet`);
+        } else {
+          console.error("Created patient missing ID:", created);
+          navigate("/patients");
+        }
       }
+    } catch (err) {
+      console.error("Failed to save patient", err);
     }
   };
 

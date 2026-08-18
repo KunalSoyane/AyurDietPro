@@ -1,27 +1,34 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import os
 
-from database import db
+from database import close_db, init_db
 from routes import auth_routes, diet_routes, food_routes, patient_routes, report_routes
 from routes import admin_routes
 from seed_data import seed_defaults
 
-app = FastAPI(title="AyurDiet Pro API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await seed_defaults()
+    yield
+    await close_db()
+
+
+app = FastAPI(title="AyurDiet Pro API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://([a-z0-9-]+\.)*onrender\.com|http://localhost:\d+",
+    allow_origin_regex=r"https://([a-z0-9-]+\.)*onrender\.com|http://(localhost|127\.0\.0\.1):\d+",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def startup_event():
-    seed_defaults(db)
 
 
 @app.get("/health")
@@ -50,18 +57,32 @@ if os.path.exists(dist_path):
     @app.get("/{fallback_path:path}")
     def serve_frontend(fallback_path: str):
         # Allow requests to API routes, health, docs, and openapi schema to fall through
-        if fallback_path.startswith("api") or fallback_path == "health" or fallback_path.startswith("docs") or fallback_path.startswith("openapi.json"):
+        if (
+            fallback_path == "api"
+            or fallback_path.startswith("api/")
+            or fallback_path == "health"
+            or fallback_path.startswith("docs")
+            or fallback_path.startswith("redoc")
+            or fallback_path.startswith("openapi.json")
+        ):
             raise HTTPException(status_code=404, detail="Not Found")
-            
-        file_path = os.path.join(dist_path, fallback_path)
+
+        # Guard against path traversal (e.g. encoded "../") escaping dist/
+        file_path = os.path.realpath(os.path.join(dist_path, fallback_path))
+        if os.path.commonpath([file_path, dist_path]) != dist_path:
+            raise HTTPException(status_code=404, detail="Not Found")
+
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
-            
+
         index_file = os.path.join(dist_path, "index.html")
         if os.path.exists(index_file):
             return FileResponse(index_file)
-            
-        return {"message": "Frontend build files found, but index.html is missing. Run npm run build in client/."}
+
+        raise HTTPException(
+            status_code=404,
+            detail="Frontend build files found, but index.html is missing. Run npm run build in client/.",
+        )
 
 
 if __name__ == "__main__":

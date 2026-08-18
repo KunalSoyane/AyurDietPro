@@ -12,8 +12,10 @@ export default function NutritionBar({ plan }) {
     <div className="card">
       <div className="target-dashboard">
         {stats.map((s) => {
-          const percent = Math.min((s.actual / s.target) * 100, 100);
-          const isOver = s.actual > s.target;
+          const target = Number(s.target) || 0;
+          const actual = Number(s.actual) || 0;
+          const percent = target > 0 ? Math.min((actual / target) * 100, 100) : 0;
+          const isOver = target > 0 && actual > target;
           return (
             <div key={s.label} className="gauge-wrap">
               <div className="gauge-label">

@@ -17,60 +17,70 @@ Endpoints:
   DELETE /api/admin/diet-plans/{id}    – Delete any diet plan
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
+from beanie.operators import In
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_admin_user, get_password_hash
-from database import get_db, SQLiteDB
+from models import DietPlan, Food, Patient, User, dump_doc, to_object_id
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
-def _str_ids(doc: dict) -> dict:
-    """Recursively convert _id fields to strings for JSON serialisation."""
-    if doc is None:
-        return doc
-    doc["id"] = str(doc.pop("_id", ""))
-    return doc
+def _public(doc_dict: dict) -> dict:
+    """Expose the document id as `id` for JSON responses."""
+    doc_dict["id"] = str(doc_dict.pop("_id", ""))
+    return doc_dict
+
+
+def _as_float(value, field: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{field} must be a number")
+
+
+def _as_int(value, field: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{field} must be an integer")
 
 
 # ─── Stats ──────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
-def get_stats(
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+async def get_stats(
+    _admin: User = Depends(get_admin_user),
 ):
     """Return high-level platform statistics."""
-    total_users    = db.users.count_documents({})
-    total_doctors  = db.users.count_documents({"role": "doctor"})
-    total_admins   = db.users.count_documents({"role": "admin"})
-    total_patients = db.patients.count_documents({})
-    total_plans    = db.diet_plans.count_documents({})
-    total_foods    = db.foods.count_documents({})
+    total_users    = await User.find_all().count()
+    total_doctors  = await User.find(User.role == "doctor").count()
+    total_admins   = await User.find(User.role == "admin").count()
+    total_patients = await Patient.find_all().count()
+    total_plans    = await DietPlan.find_all().count()
+    total_foods    = await Food.find_all().count()
 
     # Patients per vikriti
     vikriti_pipeline = [
         {"$group": {"_id": "$vikriti", "count": {"$sum": 1}}}
     ]
+    vikriti_rows = await Patient.aggregate(vikriti_pipeline).to_list()
     vikriti_breakdown = {
-        item["_id"]: item["count"]
-        for item in db.patients.aggregate(vikriti_pipeline)
-        if item["_id"]
+        item["_id"]: item["count"] for item in vikriti_rows if item["_id"]
     }
 
     # Plans and patients in last 7 days
-    from datetime import timedelta
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    recent_plans    = db.diet_plans.count_documents(
-        {"created_at": {"$gte": seven_days_ago}}
-    )
-    recent_patients = db.patients.count_documents(
-        {"created_at": {"$gte": seven_days_ago}}
-    )
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    recent_plans = await DietPlan.find(
+        DietPlan.created_at >= seven_days_ago
+    ).count()
+    recent_patients = await Patient.find(
+        Patient.created_at >= seven_days_ago
+    ).count()
 
     return {
         "users": {
@@ -96,185 +106,207 @@ def get_stats(
 # ─── User Management ────────────────────────────────────────────────────────
 
 @router.get("/users")
-def list_users(
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+async def list_users(
+    _admin: User = Depends(get_admin_user),
 ):
-    users = list(db.users.find({}, {"password_hash": 0}).sort("created_at", -1))
-    for u in users:
-        u["id"] = str(u.pop("_id"))
-    return users
+    users = await User.find_all().sort([("created_at", -1)]).to_list()
+    result = []
+    for user in users:
+        data = dump_doc(user)
+        data.pop("password_hash", None)
+        result.append(_public(data))
+    return result
 
 
 @router.post("/users", status_code=201)
-def create_user(
+async def create_user(
     payload: dict,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
     """Create a doctor or admin account."""
-    email = (payload.get("email") or "").lower().strip()
-    if not email or not payload.get("password") or not payload.get("name"):
-        raise HTTPException(status_code=422, detail="name, email and password are required")
+    name = payload.get("name")
+    email_raw = payload.get("email")
+    password = payload.get("password")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(status_code=422, detail="name must be a non-empty string")
+    if not isinstance(email_raw, str) or not email_raw.strip():
+        raise HTTPException(status_code=422, detail="email must be a non-empty string")
+    if not isinstance(password, str) or not password:
+        raise HTTPException(status_code=422, detail="password must be a non-empty string")
 
-    if db.users.find_one({"email": email}):
+    email = email_raw.lower().strip()
+
+    if await User.find_one(User.email == email):
         raise HTTPException(status_code=409, detail="Email already registered")
 
     role = payload.get("role", "doctor")
     if role not in ("doctor", "admin"):
         raise HTTPException(status_code=422, detail="role must be 'doctor' or 'admin'")
 
-    user_doc = {
-        "name": payload["name"].strip(),
-        "email": email,
-        "password_hash": get_password_hash(payload["password"]),
-        "role": role,
-        "created_at": datetime.utcnow(),
-    }
-    result = db.users.insert_one(user_doc)
-    user_doc["id"] = str(result.inserted_id)
+    user = User(
+        name=name.strip(),
+        email=email,
+        password_hash=get_password_hash(password),
+        role=role,
+        created_at=datetime.now(timezone.utc),
+    )
+    await user.insert()
+    user_doc = dump_doc(user)
     user_doc.pop("password_hash", None)
-    user_doc.pop("_id", None)
-    return user_doc
+    return _public(user_doc)
 
 
 @router.put("/users/{user_id}")
-def update_user(
+async def update_user(
     user_id: str,
     payload: dict,
-    db: SQLiteDB = Depends(get_db),
-    admin: dict = Depends(get_admin_user),
+    admin: User = Depends(get_admin_user),
 ):
     """Update a user's name or role. Cannot demote yourself."""
-    if user_id == str(admin["_id"]) and payload.get("role") != "admin":
+    if (
+        user_id == str(admin.id)
+        and "role" in payload
+        and payload["role"] != "admin"
+    ):
         raise HTTPException(status_code=400, detail="Cannot demote your own admin account")
 
     update = {}
     if "name" in payload:
+        if not isinstance(payload["name"], str) or not payload["name"].strip():
+            raise HTTPException(status_code=422, detail="name must be a non-empty string")
         update["name"] = payload["name"].strip()
     if "role" in payload:
         if payload["role"] not in ("doctor", "admin"):
             raise HTTPException(status_code=422, detail="role must be 'doctor' or 'admin'")
         update["role"] = payload["role"]
     if "password" in payload and payload["password"]:
+        if not isinstance(payload["password"], str):
+            raise HTTPException(status_code=422, detail="password must be a string")
         update["password_hash"] = get_password_hash(payload["password"])
 
     if not update:
         raise HTTPException(status_code=422, detail="No valid fields to update")
 
-    result = db.users.update_one({"_id": user_id}, {"$set": update})
-    if result.matched_count == 0:
+    oid = to_object_id(user_id)
+    user = await User.find_one(User.id == oid) if oid else None
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    user = db.users.find_one({"_id": user_id}, {"password_hash": 0})
-    user["id"] = str(user.pop("_id"))
-    return user
+    for field, value in update.items():
+        setattr(user, field, value)
+    await user.save()
+
+    user_doc = dump_doc(user)
+    user_doc.pop("password_hash", None)
+    return _public(user_doc)
 
 
 @router.delete("/users/{user_id}")
-def delete_user(
+async def delete_user(
     user_id: str,
-    db: SQLiteDB = Depends(get_db),
-    admin: dict = Depends(get_admin_user),
+    admin: User = Depends(get_admin_user),
 ):
-    """Delete a user. Cannot delete yourself."""
-    if user_id == str(admin["_id"]):
+    """Delete a user. Cannot delete yourself. Cascades their patients and plans."""
+    if user_id == str(admin.id):
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    result = db.users.delete_one({"_id": user_id})
-    if result.deleted_count == 0:
+    oid = to_object_id(user_id)
+    user = await User.find_one(User.id == oid) if oid else None
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    await user.delete()
+
+    patient_ids = [
+        str(p.id) for p in await Patient.find(Patient.user_id == user_id).to_list()
+    ]
+    if patient_ids:
+        await DietPlan.find(In(DietPlan.patient_id, patient_ids)).delete()
+    await Patient.find(Patient.user_id == user_id).delete()
+    await DietPlan.find(DietPlan.user_id == user_id).delete()
     return {"success": True, "deleted_id": user_id}
 
 
 # ─── Patient Management ─────────────────────────────────────────────────────
 
 @router.get("/patients")
-def list_all_patients(
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+async def list_all_patients(
+    _admin: User = Depends(get_admin_user),
 ):
     """Return all patients across all doctors."""
-    patients = list(db.patients.find().sort("created_at", -1))
-    for p in patients:
-        p["id"] = str(p.pop("_id"))
-    return patients
+    patients = await Patient.find_all().sort([("created_at", -1)]).to_list()
+    return [_public(dump_doc(p)) for p in patients]
 
 
 @router.delete("/patients/{patient_id}")
-def delete_patient(
+async def delete_patient(
     patient_id: str,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
-    result = db.patients.delete_one({"_id": patient_id})
-    if result.deleted_count == 0:
+    oid = to_object_id(patient_id)
+    patient = await Patient.find_one(Patient.id == oid) if oid else None
+    if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    await patient.delete()
     # Also remove their plans
-    db.diet_plans.delete_many({"patient_id": patient_id})
+    await DietPlan.find(DietPlan.patient_id == patient_id).delete()
     return {"success": True}
 
 
 # ─── Food Management ────────────────────────────────────────────────────────
 
 @router.get("/foods")
-def list_all_foods(
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+async def list_all_foods(
+    _admin: User = Depends(get_admin_user),
 ):
-    foods = list(db.foods.find().sort("name", 1))
-    for f in foods:
-        f["id"] = str(f.pop("_id"))
-    return foods
+    foods = await Food.find_all().sort("name").to_list()
+    return [_public(dump_doc(f)) for f in foods]
 
 
 @router.post("/foods", status_code=201)
-def create_food(
+async def create_food(
     payload: dict,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
     """Add a new food to the database."""
     if not payload.get("name") or not payload.get("category"):
         raise HTTPException(status_code=422, detail="name and category are required")
+    if not isinstance(payload["name"], str) or not isinstance(payload["category"], str):
+        raise HTTPException(status_code=422, detail="name and category must be strings")
 
-    if db.foods.find_one({"name": payload["name"]}):
+    if await Food.find_one(Food.name == payload["name"]):
         raise HTTPException(status_code=409, detail="Food with this name already exists")
 
-    food_doc = {
-        "name": payload["name"],
-        "name_hindi": payload.get("name_hindi"),
-        "category": payload["category"],
-        "subcategory": payload.get("subcategory"),
-        "calories": float(payload.get("calories", 0)),
-        "protein_g": float(payload.get("protein_g", 0)),
-        "carbs_g": float(payload.get("carbs_g", 0)),
-        "fat_g": float(payload.get("fat_g", 0)),
-        "fiber_g": float(payload.get("fiber_g", 0)),
-        "rasa": payload.get("rasa"),
-        "virya": payload.get("virya"),
-        "vipaka": payload.get("vipaka"),
-        "vata_effect": int(payload.get("vata_effect", 0)),
-        "pitta_effect": int(payload.get("pitta_effect", 0)),
-        "kapha_effect": int(payload.get("kapha_effect", 0)),
-        "is_pathya_for": payload.get("is_pathya_for", []),
-        "is_apathya_for": payload.get("is_apathya_for", []),
-        "is_vegetarian": bool(payload.get("is_vegetarian", True)),
-        "season_best": payload.get("season_best"),
-        "description": payload.get("description"),
-    }
-    result = db.foods.insert_one(food_doc)
-    food_doc["id"] = str(result.inserted_id)
-    food_doc.pop("_id", None)
-    return food_doc
+    food = Food(
+        name=payload["name"],
+        name_hindi=payload.get("name_hindi"),
+        category=payload["category"],
+        subcategory=payload.get("subcategory"),
+        calories=_as_float(payload.get("calories", 0), "calories"),
+        protein_g=_as_float(payload.get("protein_g", 0), "protein_g"),
+        carbs_g=_as_float(payload.get("carbs_g", 0), "carbs_g"),
+        fat_g=_as_float(payload.get("fat_g", 0), "fat_g"),
+        fiber_g=_as_float(payload.get("fiber_g", 0), "fiber_g"),
+        rasa=payload.get("rasa"),
+        virya=payload.get("virya"),
+        vipaka=payload.get("vipaka"),
+        vata_effect=_as_int(payload.get("vata_effect", 0), "vata_effect"),
+        pitta_effect=_as_int(payload.get("pitta_effect", 0), "pitta_effect"),
+        kapha_effect=_as_int(payload.get("kapha_effect", 0), "kapha_effect"),
+        is_pathya_for=payload.get("is_pathya_for", []),
+        is_apathya_for=payload.get("is_apathya_for", []),
+        is_vegetarian=bool(payload.get("is_vegetarian", True)),
+        season_best=payload.get("season_best"),
+        description=payload.get("description"),
+    )
+    await food.insert()
+    return _public(dump_doc(food))
 
 
 @router.put("/foods/{food_id}")
-def update_food(
+async def update_food(
     food_id: str,
     payload: dict,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
     """Edit any field of a food."""
     allowed_fields = {
@@ -288,48 +320,60 @@ def update_food(
     if not update:
         raise HTTPException(status_code=422, detail="No valid fields provided")
 
-    result = db.foods.update_one({"_id": food_id}, {"$set": update})
-    if result.matched_count == 0:
+    oid = to_object_id(food_id)
+    food = await Food.find_one(Food.id == oid) if oid else None
+    if not food:
         raise HTTPException(status_code=404, detail="Food not found")
 
-    food = db.foods.find_one({"_id": food_id})
-    food["id"] = str(food.pop("_id"))
-    return food
+    for field, value in update.items():
+        setattr(food, field, value)
+    await food.save()
+
+    return _public(dump_doc(food))
 
 
 @router.delete("/foods/{food_id}")
-def delete_food(
+async def delete_food(
     food_id: str,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
-    result = db.foods.delete_one({"_id": food_id})
-    if result.deleted_count == 0:
+    oid = to_object_id(food_id)
+    food = await Food.find_one(Food.id == oid) if oid else None
+    if not food:
         raise HTTPException(status_code=404, detail="Food not found")
+    await food.delete()
     return {"success": True}
 
 
 # ─── Diet Plan Management ───────────────────────────────────────────────────
 
 @router.get("/diet-plans")
-def list_all_plans(
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+async def list_all_plans(
+    _admin: User = Depends(get_admin_user),
 ):
     """All diet plans across all users (without embedded items for performance)."""
-    plans = list(db.diet_plans.find({}, {"items": 0}).sort("created_at", -1).limit(500))
-    for p in plans:
-        p["id"] = str(p.pop("_id"))
-    return plans
+    plans = (
+        await DietPlan.find_all()
+        .sort([("created_at", -1)])
+        .limit(500)
+        .to_list()
+    )
+    result = []
+    for plan in plans:
+        data = dump_doc(plan)
+        data.pop("items", None)
+        result.append(_public(data))
+    return result
 
 
 @router.delete("/diet-plans/{plan_id}")
-def delete_plan(
+async def delete_plan(
     plan_id: str,
-    db: SQLiteDB = Depends(get_db),
-    _admin: dict = Depends(get_admin_user),
+    _admin: User = Depends(get_admin_user),
 ):
-    result = db.diet_plans.delete_one({"_id": plan_id})
-    if result.deleted_count == 0:
+    oid = to_object_id(plan_id)
+    plan = await DietPlan.find_one(DietPlan.id == oid) if oid else None
+    if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
+    await plan.delete()
     return {"success": True}

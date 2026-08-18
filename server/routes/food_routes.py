@@ -3,19 +3,18 @@ import re
 
 import schemas
 from auth import get_current_user
-from database import get_db, SQLiteDB
+from models import Food, User, dump_doc, to_object_id
 
 router = APIRouter(prefix="/api/foods", tags=["foods"])
 
 
 @router.get("", response_model=list[schemas.FoodOut])
-def list_foods(
+async def list_foods(
     q: str | None = None,
     category: str | None = None,
     vegetarian: bool | None = None,
     vikriti: str | None = None,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     _ = current_user
     filter_query: dict = {}
@@ -36,27 +35,27 @@ def list_foods(
         elif v == "kapha":
             filter_query["kapha_effect"] = {"$lte": 0}
 
-    foods = list(db.foods.find(filter_query).sort("name", 1).limit(200))
-    return foods
+    foods = await Food.find(filter_query).sort("name").limit(200).to_list()
+    return [dump_doc(f) for f in foods]
 
 
 @router.get("/categories", response_model=list[str])
-def list_categories(
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+async def list_categories(
+    current_user: User = Depends(get_current_user),
 ):
     _ = current_user
-    return sorted(db.foods.distinct("category"))
+    categories = await Food.get_motor_collection().distinct("category")
+    return sorted(categories)
 
 
 @router.get("/{food_id}", response_model=schemas.FoodOut)
-def get_food(
+async def get_food(
     food_id: str,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     _ = current_user
-    food = db.foods.find_one({"_id": food_id})
+    oid = to_object_id(food_id)
+    food = await Food.find_one(Food.id == oid) if oid else None
     if not food:
         raise HTTPException(status_code=404, detail="Food not found")
-    return food
+    return dump_doc(food)

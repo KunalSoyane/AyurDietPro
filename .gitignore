@@ -1,4 +1,16 @@
 node_modules/
 client/node_modules/
-node_modules/
-client/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment files (never commit secrets)
+.env
+server/.env
+client/.env.local
+
+# Legacy SQLite database (replaced by MongoDB)
+server/ayurdiet.db
+server/ayurdiet.db-*

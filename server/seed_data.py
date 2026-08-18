@@ -284,26 +284,28 @@ def _generated_foods() -> list[dict]:
     return generated
 
 
-def seed_defaults(db) -> None:
-    from datetime import datetime
+async def seed_defaults() -> None:
+    from datetime import datetime, timezone
 
-    if not db.users.find_one({"email": "admin@ayurdiet.com"}):
-        db.users.insert_one({
-            "name": "Super Admin",
-            "email": "admin@ayurdiet.com",
-            "password_hash": get_password_hash("admin1234"),
-            "role": "admin",
-            "created_at": datetime.utcnow()
-        })
+    from models import DietTemplate, Food, User
 
-    if not db.users.find_one({"email": "doctor@ayurdiet.com"}):
-        db.users.insert_one({
-            "name": "Demo Doctor",
-            "email": "doctor@ayurdiet.com",
-            "password_hash": get_password_hash("demo1234"),
-            "role": "doctor",
-            "created_at": datetime.utcnow()
-        })
+    if await User.find_one(User.email == "admin@ayurdiet.com") is None:
+        await User(
+            name="Super Admin",
+            email="admin@ayurdiet.com",
+            password_hash=get_password_hash("admin1234"),
+            role="admin",
+            created_at=datetime.now(timezone.utc),
+        ).insert()
+
+    if await User.find_one(User.email == "doctor@ayurdiet.com") is None:
+        await User(
+            name="Demo Doctor",
+            email="doctor@ayurdiet.com",
+            password_hash=get_password_hash("demo1234"),
+            role="doctor",
+            created_at=datetime.now(timezone.utc),
+        ).insert()
 
     templates_data = [
         ("Vata-Pacifying", "Vata", "Balancing", "Warm, grounding, nourishing foods.", {
@@ -345,7 +347,7 @@ def seed_defaults(db) -> None:
     ]
     
     for name, vikriti, goal, desc, slots in templates_data:
-        db.diet_templates.update_one(
+        await DietTemplate.get_motor_collection().update_one(
             {"name": name},
             {"$set": {
                 "name": name,
@@ -1042,10 +1044,10 @@ def seed_defaults(db) -> None:
             },
     ]
     foods.extend(_generated_foods())
-    
+
     # Insert or update foods
     for food_dict in foods:
-        db.foods.update_one(
+        await Food.get_motor_collection().update_one(
             {"name": food_dict["name"]},
             {"$set": food_dict},
             upsert=True

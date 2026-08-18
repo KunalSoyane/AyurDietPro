@@ -7,6 +7,39 @@ import NutritionBar from "../components/NutritionBar";
 import ReasoningModal from "../components/ReasoningModal";
 import { exportDietPlanPdf } from "../utils/pdfExport";
 
+function TargetCaloriesInput({ value, onCommit }) {
+  const [draft, setDraft] = useState(value ?? "");
+
+  useEffect(() => {
+    setDraft(value ?? "");
+  }, [value]);
+
+  const commit = () => {
+    const parsed = Number(draft);
+    if (draft !== "" && Number.isFinite(parsed) && parsed > 0 && parsed !== value) {
+      onCommit(parsed);
+    } else {
+      setDraft(value ?? "");
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        }
+      }}
+      style={{ width: "100px", padding: "4px 8px" }}
+    />
+  );
+}
+
 export default function DietChartPage() {
   const { id } = useParams();
   const [patient, setPatient] = useState(null);
@@ -56,31 +89,42 @@ export default function DietChartPage() {
   const updateItem = async (item, foodId, portionG) => {
     const planId = plan?._id || plan?.id;
     const itemId = item?._id || item?.id;
-    if (!planId) return;
+    if (!planId || itemId === undefined || itemId === null) return;
 
-    const updated = await api.updatePlan(planId, {
-      items: [{ id: itemId, food_id: foodId || item.food_id, portion_g: portionG || item.portion_g }],
-    });
-    setPlan(updated);
+    try {
+      const updated = await api.updatePlan(planId, {
+        items: [{ id: String(itemId), food_id: String(foodId || item.food_id), portion_g: portionG || item.portion_g }],
+      });
+      setPlan(updated);
+    } catch (err) {
+      console.error("Failed to update meal item", err);
+    }
   };
 
   const updateTargets = async (targets) => {
     const planId = plan?._id || plan?.id;
     if (!planId) return;
 
-    const updated = await api.updatePlan(planId, targets);
-    setPlan(updated);
+    try {
+      const updated = await api.updatePlan(planId, targets);
+      setPlan(updated);
+    } catch (err) {
+      console.error("Failed to update targets", err);
+    }
   };
 
   const generate = async () => {
     if (!id || !templateId) return;
 
-    // Send string IDs to match FastAPI expectations
-    const generated = await api.generatePlan({
-      patient_id: String(id),
-      template_id: String(templateId),
-    });
-    setPlan(generated);
+    try {
+      const generated = await api.generatePlan({
+        patient_id: String(id),
+        template_id: String(templateId),
+      });
+      setPlan(generated);
+    } catch (err) {
+      console.error("Failed to generate plan", err);
+    }
   };
 
   const dayItems = useMemo(() => {
@@ -151,11 +195,9 @@ export default function DietChartPage() {
               <div className="row">
                 <div className="form-group">
                   <label style={{ fontSize: "0.7rem" }}>TARGET CALORIES</label>
-                  <input
-                    type="number"
-                    value={plan.target_calories || ""}
-                    onChange={(e) => updateTargets({ target_calories: Number(e.target.value) })}
-                    style={{ width: "100px", padding: "4px 8px" }}
+                  <TargetCaloriesInput
+                    value={plan.target_calories}
+                    onCommit={(n) => updateTargets({ target_calories: n })}
                   />
                 </div>
               </div>

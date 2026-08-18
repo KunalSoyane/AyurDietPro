@@ -38,8 +38,12 @@ export default function PatientsPage() {
                   className="text-btn danger"
                   onClick={async () => {
                     if (window.confirm("Are you sure you want to delete this patient?")) {
-                      await api.deletePatient(patientId);
-                      setPatients(patients.filter((p) => (p._id || p.id) !== patientId));
+                      try {
+                        await api.deletePatient(patientId);
+                        setPatients((prev) => prev.filter((p) => (p._id || p.id) !== patientId));
+                      } catch (err) {
+                        console.error("Failed to delete patient", err);
+                      }
                     }
                   }}
                 >

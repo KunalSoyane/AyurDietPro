@@ -39,7 +39,7 @@ export default function WeeklyReportPage() {
           <span className="stat-value">{data.stats.new_plans}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Top Condition</span>
+          <span className="stat-label">Top Vikriti</span>
           <span className="stat-value" style={{ fontSize: "1.5rem" }}>
             {Object.keys(data.stats.vikriti_breakdown).length > 0
               ? Object.entries(data.stats.vikriti_breakdown).sort((a, b) => b[1] - a[1])[0][0]
@@ -57,10 +57,10 @@ export default function WeeklyReportPage() {
               <div>
                 <strong>{p.name}</strong>
                 <div className="muted" style={{ fontSize: "0.8rem" }}>
-                  Added on {new Date(p.created_at).toLocaleDateString()}
+                  Added on {p.created_at ? new Date(p.created_at).toLocaleDateString() : "—"}
                 </div>
               </div>
-              <span className={`pill ${p.vikriti.toLowerCase()}`}>{p.vikriti}</span>
+              <span className={`pill ${(p.vikriti || "vata").toLowerCase()}`}>{p.vikriti || "Unknown"}</span>
             </li>
           ))}
         </ul>

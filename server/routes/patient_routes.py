@@ -1,74 +1,87 @@
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime
 
 import schemas
 from auth import get_current_user
-from database import get_db, SQLiteDB
+from models import DietPlan, Patient, User, dump_doc, to_object_id
 
 router = APIRouter(prefix="/api/patients", tags=["patients"])
 
 
 @router.get("", response_model=list[schemas.PatientOut])
-def list_patients(
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+async def list_patients(
+    current_user: User = Depends(get_current_user),
 ):
-    patients = list(db.patients.find({"user_id": str(current_user["_id"])}).sort("_id", -1))
-    return patients
+    patients = (
+        await Patient.find(Patient.user_id == str(current_user.id))
+        .sort("-created_at")
+        .to_list()
+    )
+    return [dump_doc(p) for p in patients]
 
 
 @router.post("", response_model=schemas.PatientOut)
-def create_patient(
+async def create_patient(
     payload: schemas.PatientCreate,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    patient_dict = payload.model_dump()
-    patient_dict["user_id"] = str(current_user["_id"])
-    patient_dict["created_at"] = datetime.utcnow()
-    result = db.patients.insert_one(patient_dict)
-    patient_dict["_id"] = result.inserted_id
-    return patient_dict
+    patient = Patient(**payload.model_dump(), user_id=str(current_user.id))
+    await patient.insert()
+    return dump_doc(patient)
 
 
 @router.get("/{patient_id}", response_model=schemas.PatientOut)
-def get_patient(
+async def get_patient(
     patient_id: str,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    patient = db.patients.find_one({"_id": patient_id, "user_id": str(current_user["_id"])})
+    oid = to_object_id(patient_id)
+    patient = (
+        await Patient.find_one(Patient.id == oid, Patient.user_id == str(current_user.id))
+        if oid
+        else None
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
-    return patient
+    return dump_doc(patient)
 
 
 @router.put("/{patient_id}", response_model=schemas.PatientOut)
-def update_patient(
+async def update_patient(
     patient_id: str,
     payload: schemas.PatientUpdate,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    patient = db.patients.find_one({"_id": patient_id, "user_id": str(current_user["_id"])})
+    oid = to_object_id(patient_id)
+    patient = (
+        await Patient.find_one(Patient.id == oid, Patient.user_id == str(current_user.id))
+        if oid
+        else None
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
     update_data = {k: v for k, v in payload.model_dump().items() if v is not None}
     if update_data:
-        db.patients.update_one({"_id": patient_id}, {"$set": update_data})
-        patient.update(update_data)
+        for field, value in update_data.items():
+            setattr(patient, field, value)
+        await patient.save()
 
-    return patient
+    return dump_doc(patient)
 
 
 @router.delete("/{patient_id}")
-def delete_patient(
+async def delete_patient(
     patient_id: str,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    result = db.patients.delete_one({"_id": patient_id, "user_id": str(current_user["_id"])})
-    if result.deleted_count == 0:
+    oid = to_object_id(patient_id)
+    patient = (
+        await Patient.find_one(Patient.id == oid, Patient.user_id == str(current_user.id))
+        if oid
+        else None
+    )
+    if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    await patient.delete()
+    await DietPlan.find(DietPlan.patient_id == patient_id).delete()
     return {"success": True}

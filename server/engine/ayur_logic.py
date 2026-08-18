@@ -1,8 +1,10 @@
 import random
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from engine.conflict_checker import check_conflict
+from models import DietPlan, Food, dump_doc
 
 MEAL_SPLITS = {
     "Breakfast": 0.25,
@@ -54,13 +56,13 @@ def _dosha_compatible(food: dict, vikriti: str) -> bool:
     return True
 
 
-def generate_plan(db, patient: dict, doctor: dict, template: dict) -> dict:
+async def generate_plan(patient: dict, doctor_id: str, template: dict) -> dict:
     target_calories = calculate_bmr(patient)
     target_protein = (target_calories * 0.20) / 4
     target_carbs = (target_calories * 0.55) / 4
     target_fat = (target_calories * 0.25) / 9
 
-    foods = list(db.foods.find())
+    foods = [dump_doc(food) for food in await Food.find_all().to_list()]
     candidate_foods = [
         food
         for food in foods
@@ -78,14 +80,14 @@ def generate_plan(db, patient: dict, doctor: dict, template: dict) -> dict:
 
     plan = {
         "patient_id": str(patient["_id"]),
-        "user_id": str(doctor["_id"]),
+        "user_id": doctor_id,
         "template_id": str(template["_id"]),
         "target_calories": round(target_calories, 2),
         "target_protein": round(target_protein, 2),
         "target_carbs": round(target_carbs, 2),
         "target_fat": round(target_fat, 2),
         "notes": f"Auto-generated from template: {template.get('name')}",
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "items": []
     }
 
@@ -124,6 +126,7 @@ def generate_plan(db, patient: dict, doctor: dict, template: dict) -> dict:
             )
 
             item = {
+                "_id": uuid4().hex,
                 "food_id": str(chosen["_id"]),
                 "food": chosen,  # embed food document
                 "meal_slot": meal_slot,
@@ -148,7 +151,7 @@ def generate_plan(db, patient: dict, doctor: dict, template: dict) -> dict:
     plan["total_carbs"] = round(total_c / 7.0, 2)
     plan["total_fat"] = round(total_f / 7.0, 2)
 
-    result = db.diet_plans.insert_one(plan)
-    plan["_id"] = result.inserted_id
+    plan_doc = DietPlan(**plan)
+    await plan_doc.insert()
 
-    return plan
+    return dump_doc(plan_doc)

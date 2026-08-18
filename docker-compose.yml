@@ -1,10 +1,21 @@
 services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+
   backend:
     build: ./server
     ports:
       - "8000:8000"
     environment:
       - PORT=8000
+      - MONGODB_URI=${MONGODB_URI:-mongodb://mongo:27017}
+      - MONGODB_DB=${MONGODB_DB:-ayurdiet}
+      - SECRET_KEY=${SECRET_KEY:-change-me-to-a-long-random-string}
+    depends_on:
+      - mongo
 
   frontend:
     build: ./client
@@ -12,3 +23,6 @@ services:
       - "80:80"
     depends_on:
       - backend
+
+volumes:
+  mongo_data:

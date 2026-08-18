@@ -1,6 +1,22 @@
+import { useEffect, useState } from "react";
 import ConflictBadge from "./ConflictBadge";
 
 export default function MealCard({ item, onPortionChange, actions }) {
+  const [portionDraft, setPortionDraft] = useState(item.portion_g);
+
+  useEffect(() => {
+    setPortionDraft(item.portion_g);
+  }, [item.portion_g]);
+
+  const commitPortion = () => {
+    const parsed = Number(portionDraft);
+    if (portionDraft !== "" && Number.isFinite(parsed) && parsed > 0 && parsed !== item.portion_g) {
+      onPortionChange(parsed);
+    } else {
+      setPortionDraft(item.portion_g);
+    }
+  };
+
   const getDoshaIcon = (effect) => {
     if (effect > 0) return "⬆️";
     if (effect < 0) return "⬇️";
@@ -23,8 +39,15 @@ export default function MealCard({ item, onPortionChange, actions }) {
         <label>Portion (g)</label>
         <input
           type="number"
-          value={item.portion_g}
-          onChange={(e) => onPortionChange(Number(e.target.value))}
+          value={portionDraft}
+          onChange={(e) => setPortionDraft(e.target.value)}
+          onBlur={commitPortion}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitPortion();
+            }
+          }}
           style={{ width: "80px" }}
         />
       </div>

@@ -2,140 +2,171 @@ from fastapi import APIRouter, Depends, HTTPException
 
 import schemas
 from auth import get_current_user
-from database import get_db, SQLiteDB
 from engine.ayur_logic import generate_plan
+from engine.conflict_checker import check_conflict
+from models import DietPlan, DietTemplate, Food, Patient, User, dump_doc, to_object_id
 
 router = APIRouter(tags=["diet"])
 
 
 def _format_plan(plan: dict) -> dict:
     plan["id"] = str(plan["_id"])
-    for item in plan.get("items", []):
-        if "_id" in item:
-            item["id"] = str(item["_id"])
+    for idx, item in enumerate(plan.get("items", [])):
+        item["id"] = str(item.get("_id") or idx)
         if "food" in item and "_id" in item["food"]:
             item["food"]["id"] = str(item["food"]["_id"])
     return plan
 
 
 @router.get("/api/templates", response_model=list[schemas.TemplateOut])
-def list_templates(
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+async def list_templates(
+    current_user: User = Depends(get_current_user),
 ):
     _ = current_user
-    templates = list(db.diet_templates.find().sort("_id", 1))
-    for t in templates:
-        t["id"] = str(t["_id"])
-    return templates
+    templates = await DietTemplate.find_all().sort([("_id", 1)]).to_list()
+    return [dump_doc(t) for t in templates]
 
 
 @router.get("/api/diet-plans", response_model=list[schemas.DietPlanOut])
-def list_diet_plans(
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+async def list_diet_plans(
+    current_user: User = Depends(get_current_user),
 ):
-    plans = list(db.diet_plans.find({"user_id": str(current_user["_id"])}).sort("created_at", -1))
-    return [_format_plan(p) for p in plans]
+    plans = (
+        await DietPlan.find(DietPlan.user_id == str(current_user.id))
+        .sort([("created_at", -1)])
+        .to_list()
+    )
+    return [_format_plan(dump_doc(p)) for p in plans]
 
 
 @router.post("/api/diet-plans/generate", response_model=schemas.DietPlanOut)
-def create_plan(
+async def create_plan(
     payload: schemas.DietPlanGenerateRequest,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    patient = db.patients.find_one({"_id": payload.patient_id, "user_id": str(current_user["_id"])})
+    patient_oid = to_object_id(payload.patient_id)
+    patient = (
+        await Patient.find_one(Patient.id == patient_oid, Patient.user_id == str(current_user.id))
+        if patient_oid
+        else None
+    )
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    template = db.diet_templates.find_one({"_id": payload.template_id})
+    template_oid = to_object_id(payload.template_id)
+    template = await DietTemplate.find_one(DietTemplate.id == template_oid) if template_oid else None
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    plan = generate_plan(db, patient, current_user, template)
+    plan = await generate_plan(dump_doc(patient), str(current_user.id), dump_doc(template))
     return _format_plan(plan)
 
 
 @router.get("/api/diet-plans/{plan_id}", response_model=schemas.DietPlanOut)
-def get_plan(
+async def get_plan(
     plan_id: str,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    plan = db.diet_plans.find_one({"_id": plan_id, "user_id": str(current_user["_id"])})
+    oid = to_object_id(plan_id)
+    plan = (
+        await DietPlan.find_one(DietPlan.id == oid, DietPlan.user_id == str(current_user.id))
+        if oid
+        else None
+    )
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
-    return _format_plan(plan)
+    return _format_plan(dump_doc(plan))
+
+
+@router.get("/api/public/plan/{plan_id}", response_model=schemas.DietPlanOut)
+async def get_public_plan(plan_id: str):
+    oid = to_object_id(plan_id)
+    plan = await DietPlan.find_one(DietPlan.id == oid) if oid else None
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return _format_plan(dump_doc(plan))
 
 
 @router.get("/api/diet-plans/patient/{patient_id}", response_model=list[schemas.DietPlanOut])
-def list_plans_for_patient(
+async def list_plans_for_patient(
     patient_id: str,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    plans = list(db.diet_plans.find({
-        "patient_id": patient_id,
-        "user_id": str(current_user["_id"])
-    }).sort("_id", -1))
-    return [_format_plan(p) for p in plans]
+    plans = (
+        await DietPlan.find(
+            DietPlan.patient_id == patient_id,
+            DietPlan.user_id == str(current_user.id),
+        )
+        .sort([("_id", -1)])
+        .to_list()
+    )
+    return [_format_plan(dump_doc(p)) for p in plans]
 
 
 @router.put("/api/diet-plans/{plan_id}", response_model=schemas.DietPlanOut)
-def update_plan(
+async def update_plan(
     plan_id: str,
     payload: schemas.DietPlanUpdate,
-    db: SQLiteDB = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    plan = db.diet_plans.find_one({"_id": plan_id, "user_id": str(current_user["_id"])})
+    oid = to_object_id(plan_id)
+    plan = (
+        await DietPlan.find_one(DietPlan.id == oid, DietPlan.user_id == str(current_user.id))
+        if oid
+        else None
+    )
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found")
 
-    update_fields = {}
     if payload.notes is not None:
-        update_fields["notes"] = payload.notes
+        plan.notes = payload.notes
     if payload.target_calories is not None:
-        update_fields["target_calories"] = payload.target_calories
+        plan.target_calories = payload.target_calories
     if payload.target_protein is not None:
-        update_fields["target_protein"] = payload.target_protein
+        plan.target_protein = payload.target_protein
     if payload.target_carbs is not None:
-        update_fields["target_carbs"] = payload.target_carbs
+        plan.target_carbs = payload.target_carbs
     if payload.target_fat is not None:
-        update_fields["target_fat"] = payload.target_fat
-
-    if update_fields:
-        db.diet_plans.update_one({"_id": plan_id}, {"$set": update_fields})
-        plan.update(update_fields)
+        plan.target_fat = payload.target_fat
 
     # Update embedded items
     if payload.items:
+        patient_oid = to_object_id(plan.patient_id)
+        patient = await Patient.find_one(Patient.id == patient_oid) if patient_oid else None
+        patient_dict = dump_doc(patient) if patient else None
+
         for item_update in payload.items:
-            for item in plan.get("items", []):
-                if str(item.get("id", "")) == str(item_update.id) or str(item.get("_id", "")) == str(item_update.id):
-                    food = db.foods.find_one({"_id": item_update.food_id})
-                    if food:
-                        factor = item_update.portion_g / 100.0
-                        item["food_id"] = str(food["_id"])
-                        item["food"] = food
-                        item["portion_g"] = item_update.portion_g
-                        item["calories"] = round(food["calories"] * factor, 2)
-                        item["protein"] = round(food["protein_g"] * factor, 2)
-                        item["carbs"] = round(food["carbs_g"] * factor, 2)
-                        item["fat"] = round(food["fat_g"] * factor, 2)
+            for idx, item in enumerate(plan.items):
+                item_id = item.item_id or str(idx)
+                if item_id != str(item_update.id):
+                    continue
+                food_oid = to_object_id(item_update.food_id)
+                food = await Food.find_one(Food.id == food_oid) if food_oid else None
+                if not food:
+                    raise HTTPException(status_code=404, detail="Food not found")
+                factor = item_update.portion_g / 100.0
+                food_dict = dump_doc(food)
+                item.food_id = str(food.id)
+                item.food = food_dict
+                item.portion_g = item_update.portion_g
+                item.calories = round(food.calories * factor, 2)
+                item.protein = round(food.protein_g * factor, 2)
+                item.carbs = round(food.carbs_g * factor, 2)
+                item.fat = round(food.fat_g * factor, 2)
+                if patient_dict:
+                    is_conflict, reason = check_conflict(food_dict, patient_dict)
+                    item.is_conflict = is_conflict
+                    item.reasoning = (
+                        reason or f"{food.name} selected for "
+                        f"{item.meal_slot} (Day {item.day_of_week})."
+                    )
+                break
 
-        plan["total_calories"] = round(sum(i.get("calories", 0) for i in plan.get("items", [])), 2)
-        plan["total_protein"] = round(sum(i.get("protein", 0) for i in plan.get("items", [])), 2)
-        plan["total_carbs"] = round(sum(i.get("carbs", 0) for i in plan.get("items", [])), 2)
-        plan["total_fat"] = round(sum(i.get("fat", 0) for i in plan.get("items", [])), 2)
+        day_count = len({i.day_of_week for i in plan.items}) or 1
+        plan.total_calories = round(sum(i.calories for i in plan.items) / day_count, 2)
+        plan.total_protein = round(sum(i.protein for i in plan.items) / day_count, 2)
+        plan.total_carbs = round(sum(i.carbs for i in plan.items) / day_count, 2)
+        plan.total_fat = round(sum(i.fat for i in plan.items) / day_count, 2)
 
-        db.diet_plans.update_one({"_id": plan_id}, {"$set": {
-            "items": plan["items"],
-            "total_calories": plan["total_calories"],
-            "total_protein": plan["total_protein"],
-            "total_carbs": plan["total_carbs"],
-            "total_fat": plan["total_fat"],
-        }})
-
-    return _format_plan(plan)
+    await plan.save()
+    return _format_plan(dump_doc(plan))

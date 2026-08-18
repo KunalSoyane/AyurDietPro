@@ -8,11 +8,11 @@ export default function FoodExplorerPage() {
   const [category, setCategory] = useState("");
 
   useEffect(() => {
-    api.foodCategories().then(setCategories);
+    api.foodCategories().then(setCategories).catch(() => setCategories([]));
   }, []);
 
   useEffect(() => {
-    api.foods({ q: query, category: category || undefined }).then(setFoods);
+    api.foods({ q: query, category: category || undefined }).then(setFoods).catch(() => setFoods([]));
   }, [query, category]);
 
   return (
@@ -29,7 +29,7 @@ export default function FoodExplorerPage() {
       </div>
       <div className="food-grid">
         {foods.map((food) => (
-          <div className="card" key={food.id}>
+          <div className="card" key={food._id || food.id}>
             <h4>
               {food.name} {food.name_hindi ? `(${food.name_hindi})` : ""}
             </h4>
