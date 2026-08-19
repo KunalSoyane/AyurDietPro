@@ -14,3 +14,5 @@ client/.env.local
 # Legacy SQLite database (replaced by MongoDB)
 server/ayurdiet.db
 server/ayurdiet.db-*
+.vercel
+.env*
